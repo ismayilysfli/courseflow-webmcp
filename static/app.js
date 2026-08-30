@@ -50,6 +50,23 @@ function formatTime(isoStr) {
     return new Date(isoStr).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 }
 
+function taskTitleForId(taskId) {
+    const task = state.analysis && state.analysis.tasks
+        ? state.analysis.tasks.find(candidate => candidate.task_id === taskId)
+        : null;
+    return task ? task.title : taskId;
+}
+
+function displayWarning(warning) {
+    if (typeof warning !== "string" || !state.analysis || !state.analysis.tasks) return warning;
+    return [...state.analysis.tasks]
+        .sort((a, b) => b.task_id.length - a.task_id.length)
+        .reduce(
+        (displayText, task) => displayText.split(task.task_id).join(task.title),
+        warning
+        );
+}
+
 function showError(elementId, message) {
     const el = document.getElementById(elementId);
     el.textContent = message;
@@ -149,19 +166,40 @@ function showStage(stageId) {
     document.getElementById(stageId).classList.add("stage-active");
     
     ["nav-step-docs", "nav-step-avail", "nav-step-plan", "nav-step-replan"].forEach(n => {
-        document.getElementById(n).classList.remove("active");
+        const navItem = document.getElementById(n);
+        navItem.classList.remove("active");
+        navItem.removeAttribute("aria-current");
     });
     
     if (stageId === "stage-documents") document.getElementById("nav-step-docs").classList.add("active");
     if (stageId === "stage-availability") document.getElementById("nav-step-avail").classList.add("active");
     if (stageId === "stage-plan") document.getElementById("nav-step-plan").classList.add("active");
     if (stageId === "stage-replan") document.getElementById("nav-step-replan").classList.add("active");
+
+    const activeNav = document.querySelector(".nav-step.active");
+    if (activeNav) activeNav.setAttribute("aria-current", "step");
+    updateProgressState(stageId);
 }
 
 function updateNavigationAccess() {
     document.getElementById("nav-step-avail").disabled = !state.analysis;
     document.getElementById("nav-step-plan").disabled = !state.plan;
     document.getElementById("nav-step-replan").disabled = !state.plan;
+    const activeStage = document.querySelector(".stage-active");
+    updateProgressState(activeStage ? activeStage.id : "stage-documents");
+}
+
+function updateProgressState(activeStageId) {
+    const completed = {
+        "nav-step-docs": Boolean(state.analysis) && activeStageId !== "stage-documents",
+        "nav-step-avail": Boolean(state.plan) && activeStageId !== "stage-availability",
+        "nav-step-plan": Boolean(state.plan) && activeStageId === "stage-replan",
+        "nav-step-replan": false,
+    };
+
+    Object.entries(completed).forEach(([id, isCompleted]) => {
+        document.getElementById(id).classList.toggle("completed", isCompleted);
+    });
 }
 
 document.querySelectorAll(".nav-step").forEach(button => {
@@ -202,10 +240,10 @@ function preventDefaults(e) {
 }
 
 ['dragenter', 'dragover'].forEach(eventName => {
-    dropArea.addEventListener(eventName, () => dropArea.style.borderColor = "var(--accent-color)");
+    dropArea.addEventListener(eventName, () => dropArea.classList.add("is-dragging"));
 });
 ['dragleave', 'drop'].forEach(eventName => {
-    dropArea.addEventListener(eventName, () => dropArea.style.borderColor = "var(--border-color)");
+    dropArea.addEventListener(eventName, () => dropArea.classList.remove("is-dragging"));
 });
 
 dropArea.addEventListener("drop", (e) => {
@@ -245,8 +283,14 @@ function renderFileList() {
     const list = document.getElementById("file-list");
     list.innerHTML = state.pdfs.map((f, i) => `
         <div class="file-item" data-testid="file-item-${i}">
-            <span>${escapeHtml(f.name)} <span style="color:var(--text-secondary);font-size:0.85rem">(${formatBytes(f.size)})</span></span>
-            <button type="button" class="button button-danger-icon btn-remove-pdf" aria-label="Remove" data-index="${i}" data-testid="remove-file-${i}">&times;</button>
+            <div class="file-info">
+                <span class="file-type-icon" aria-hidden="true">PDF</span>
+                <span class="file-copy">
+                <span class="file-name" title="${escapeHtml(f.name)}">${escapeHtml(f.name)}</span>
+                    <span class="file-size">${formatBytes(f.size)} · Ready to analyze</span>
+                </span>
+            </div>
+            <button type="button" class="button button-danger-icon btn-remove-pdf" aria-label="Remove ${escapeHtml(f.name)}" data-index="${i}" data-testid="remove-file-${i}">&times;</button>
         </div>
     `).join("");
 }
@@ -336,8 +380,11 @@ function renderAnalysis() {
         if (!evList || !evList.length) return "";
         return evList.map(e => `
             <details class="evidence-details" data-testid="evidence-details">
-                <summary>Source: ${escapeHtml(e.source_file)} ${e.page_number ? `(Page ${e.page_number})` : ""}</summary>
-                <div class="evidence-snippet">${escapeHtml(e.source_snippet)}</div>
+                <summary>
+                    <span class="evidence-source" title="${escapeHtml(e.source_file)}">${escapeHtml(e.source_file)}</span>
+                    ${e.page_number ? `<span class="evidence-page">Page ${e.page_number}</span>` : ""}
+                </summary>
+                <div class="evidence-snippet">“${escapeHtml(e.source_snippet)}”</div>
             </details>
         `).join("");
     };
@@ -356,7 +403,7 @@ function renderAnalysis() {
     const delContainer = document.getElementById("analysis-deliverables");
     if (data.deliverable_evidence && data.deliverable_evidence.length) {
         delContainer.innerHTML = data.deliverable_evidence.map((d, index) => `<li data-testid="deliverable-${index}">
-            <div class="fact-text">${escapeHtml(d.fact)}</div>
+            <div class="fact-text"><span class="fact-content"><span class="fact-bullet" aria-hidden="true"></span><span>${escapeHtml(d.fact)}</span></span></div>
             ${renderEvidences(d.evidence)}
         </li>`).join("");
     } else {
@@ -366,9 +413,11 @@ function renderAnalysis() {
     const reqContainer = document.getElementById("analysis-requirements");
     if (data.requirement_evidence && data.requirement_evidence.length) {
         reqContainer.innerHTML = data.requirement_evidence.map((r, index) => `<li data-testid="requirement-${index}">
-            <div class="fact-text" style="display: flex; justify-content: space-between; align-items: baseline; gap: 0.5rem;">
-                <span>${escapeHtml(r.fact)}</span>
-                ${r.is_optional ? `<span class="badge badge-optional" data-testid="badge-optional-req-${index}">Optional</span>` : ""}
+            <div class="fact-text">
+                <span class="fact-content"><span class="fact-bullet" aria-hidden="true"></span><span>${escapeHtml(r.fact)}</span></span>
+                ${r.is_optional
+                    ? `<span class="badge badge-optional" data-testid="badge-optional-req-${index}">Optional</span>`
+                    : `<span class="badge badge-required" data-testid="badge-required-req-${index}">Required</span>`}
             </div>
             ${renderEvidences(r.evidence)}
         </li>`).join("");
@@ -379,7 +428,7 @@ function renderAnalysis() {
     const ambContainer = document.getElementById("analysis-ambiguities");
     if (data.ambiguities && data.ambiguities.length) {
         ambContainer.innerHTML = data.ambiguities.map(
-            (a, index) => `<li data-testid="ambiguity-${index}">${escapeHtml(a)}</li>`
+            (a, index) => `<li data-testid="ambiguity-${index}"><div class="fact-text"><span class="fact-content"><span class="fact-bullet" aria-hidden="true"></span><span>${escapeHtml(a)}</span></span></div></li>`
         ).join("");
     } else {
         ambContainer.innerHTML = `<li class="empty-state">No ambiguities found.</li>`;
@@ -390,12 +439,14 @@ function renderAnalysis() {
         <div class="task-card" data-testid="task-card-${escapeHtml(t.task_id)}">
             <div class="task-card-header">
                 <h5>${escapeHtml(t.title)}</h5>
-                ${t.is_optional ? `<span class="badge badge-optional" data-testid="badge-optional-${escapeHtml(t.task_id)}">Optional</span>` : ""}
+                ${t.is_optional
+                    ? `<span class="badge badge-optional" data-testid="badge-optional-${escapeHtml(t.task_id)}">Optional</span>`
+                    : `<span class="badge badge-required">Required</span>`}
             </div>
             <p class="task-desc">${escapeHtml(t.description)}</p>
             <div class="task-meta">
-                <span class="conf-badge conf-${t.confidence}">Confidence: ${t.confidence}</span>
-                <span class="est-times">Opt: ${formatMinutes(t.optimistic_minutes)} / Exp: ${formatMinutes(t.expected_minutes)} / Pess: ${formatMinutes(t.pessimistic_minutes)}</span>
+                <div class="confidence-block"><span class="meta-caption">Estimate confidence</span><span class="conf-badge conf-${t.confidence}">${t.confidence}</span></div>
+                <div class="estimate-block"><span class="meta-caption">Workload range</span><span class="est-times"><span>Optimistic ${formatMinutes(t.optimistic_minutes)}</span><span>Expected ${formatMinutes(t.expected_minutes)}</span><span>Pessimistic ${formatMinutes(t.pessimistic_minutes)}</span></span></div>
             </div>
             ${t.dependencies && t.dependencies.length ? `<div class="task-deps"><strong>Dependencies:</strong> ${t.dependencies.map(escapeHtml).join(", ")}</div>` : ""}
             <div class="task-reason"><strong>Reasoning:</strong> ${escapeHtml(t.estimation_reason)}</div>
@@ -428,17 +479,19 @@ function renderAvailabilityList(containerId, dataArray, isReplan = false) {
     const container = document.getElementById(containerId);
     container.innerHTML = dataArray.map((avail, index) => `
         <div class="avail-row" data-index="${index}">
+            <span class="window-number" aria-hidden="true">${index + 1}</span>
             <div class="avail-group">
-                <label>Date</label>
-                <input type="date" class="avail-date input-field" value="${escapeHtml(avail.date)}" data-testid="input-avail-date-${index}">
+                <label for="${containerId}-date-${index}">Date</label>
+                <input id="${containerId}-date-${index}" type="date" class="avail-date input-field" value="${escapeHtml(avail.date)}" data-testid="input-avail-date-${index}">
             </div>
             <div class="avail-group">
-                <label>Start Time</label>
-                <input type="time" class="avail-start input-field" value="${escapeHtml(avail.start)}" data-testid="input-avail-start-${index}">
+                <label for="${containerId}-start-${index}">Start time</label>
+                <input id="${containerId}-start-${index}" type="time" class="avail-start input-field" value="${escapeHtml(avail.start)}" data-testid="input-avail-start-${index}">
             </div>
+            <span class="time-separator" aria-hidden="true">to</span>
             <div class="avail-group">
-                <label>End Time</label>
-                <input type="time" class="avail-end input-field" value="${escapeHtml(avail.end)}" data-testid="input-avail-end-${index}">
+                <label for="${containerId}-end-${index}">End time</label>
+                <input id="${containerId}-end-${index}" type="time" class="avail-end input-field" value="${escapeHtml(avail.end)}" data-testid="input-avail-end-${index}">
             </div>
             <button type="button" class="button button-danger-icon btn-remove-avail" aria-label="Remove window" data-testid="button-remove-avail-${index}">
                 &times;
@@ -552,6 +605,12 @@ document.getElementById("btn-generate-plan").addEventListener("click", async () 
 function renderPlan() {
     const p = state.plan;
     const feasCard = document.getElementById("plan-feasibility");
+    const feasibilityLabels = {
+        comfortable: "Feasible",
+        tight: "At Risk",
+        at_risk: "At Risk",
+        infeasible: "Infeasible",
+    };
     
     const mandatoryTasks = (state.analysis && state.analysis.tasks) ? state.analysis.tasks.filter(t => !t.is_optional) : [];
     const hasUnfinishedMandatory = p.unfinished_tasks && p.unfinished_tasks.some(id =>
@@ -559,7 +618,7 @@ function renderPlan() {
     );
     let bufferDisplay;
     if (hasUnfinishedMandatory || p.feasibility.status === 'infeasible') {
-        bufferDisplay = "N/A — mandatory work remains unfinished";
+        bufferDisplay = "N/A - mandatory work remains unfinished";
     } else if (p.deadline_buffer_minutes !== null) {
         bufferDisplay = formatMinutes(p.deadline_buffer_minutes);
     } else {
@@ -569,21 +628,24 @@ function renderPlan() {
     feasCard.className = `feasibility-card status-${p.feasibility.status}`;
     feasCard.innerHTML = `
         <div class="feas-header">
-            <h3>Feasibility: <span class="status-label">${p.feasibility.status.replace("_", " ")}</span></h3>
+            <div class="feas-title-row">
+                <div class="feas-title-copy"><span class="feas-eyebrow">Plan health</span><h3>Feasibility assessment</h3></div>
+                <span class="status-label">${feasibilityLabels[p.feasibility.status] || p.feasibility.status.replace(/_/g, " ")}</span>
+            </div>
             <div class="feas-metrics">
-                <span data-testid="metric-available">Available time: <strong>${formatMinutes(p.feasibility.available_minutes)}</strong></span>
-                <span data-testid="metric-optimistic">Optimistic workload: <strong>${formatMinutes(p.feasibility.optimistic_workload_minutes)}</strong></span>
-                <span data-testid="metric-expected">Expected workload: <strong>${formatMinutes(p.feasibility.expected_workload_minutes)}</strong></span>
-                <span data-testid="metric-pessimistic">Pessimistic workload: <strong>${formatMinutes(p.feasibility.pessimistic_workload_minutes)}</strong></span>
-                <span data-testid="metric-optimistic-shortfall">Optimistic shortfall: <strong>${formatMinutes(p.feasibility.optimistic_shortfall_minutes)}</strong></span>
-                <span data-testid="metric-shortfall">Expected shortfall: <strong>${formatMinutes(p.feasibility.expected_shortfall_minutes)}</strong></span>
-                <span data-testid="metric-buffer">Deadline buffer: <strong>${bufferDisplay}</strong></span>
+                <span class="feas-metric" data-testid="metric-available"><span class="feas-metric-label">Available time</span><strong>${formatMinutes(p.feasibility.available_minutes)}</strong></span>
+                <span class="feas-metric" data-testid="metric-optimistic"><span class="feas-metric-label">Optimistic workload</span><strong>${formatMinutes(p.feasibility.optimistic_workload_minutes)}</strong></span>
+                <span class="feas-metric" data-testid="metric-expected"><span class="feas-metric-label">Expected workload</span><strong>${formatMinutes(p.feasibility.expected_workload_minutes)}</strong></span>
+                <span class="feas-metric" data-testid="metric-pessimistic"><span class="feas-metric-label">Pessimistic workload</span><strong>${formatMinutes(p.feasibility.pessimistic_workload_minutes)}</strong></span>
+                <span class="feas-metric" data-testid="metric-optimistic-shortfall"><span class="feas-metric-label">Optimistic shortfall</span><strong>${formatMinutes(p.feasibility.optimistic_shortfall_minutes)}</strong></span>
+                <span class="feas-metric" data-testid="metric-shortfall"><span class="feas-metric-label">Expected shortfall</span><strong>${formatMinutes(p.feasibility.expected_shortfall_minutes)}</strong></span>
+                <span class="feas-metric" data-testid="metric-buffer"><span class="feas-metric-label">Deadline buffer</span><strong>${bufferDisplay}</strong></span>
             </div>
         </div>
         ${p.feasibility.warnings && p.feasibility.warnings.length ? `
             <div class="feas-warnings">
                 <strong>Warnings</strong>
-                <ul>${p.feasibility.warnings.map(w => `<li>${escapeHtml(w)}</li>`).join("")}</ul>
+                <ul>${p.feasibility.warnings.map(w => `<li>${escapeHtml(displayWarning(w))}</li>`).join("")}</ul>
             </div>
         ` : ""}
     `;
@@ -599,7 +661,7 @@ function renderPlan() {
     });
     
     if (Object.keys(blocksByDate).length === 0) {
-        schedContainer.innerHTML = `<div class="empty-state" style="padding: 2rem; background: var(--surface); border: 1px solid var(--border-color); border-radius: var(--radius);">No tasks scheduled. Check your availability constraints or deadline.</div>`;
+        schedContainer.innerHTML = `<div class="empty-state">No tasks could be scheduled. Check your availability windows or deadline, then try again.</div>`;
     } else {
         schedContainer.innerHTML = Object.entries(blocksByDate).map(([date, blocks]) => `
             <div class="schedule-day" data-testid="schedule-day-${date}">
@@ -610,10 +672,11 @@ function renderPlan() {
                         const tEnd = formatTime(b.end);
                         return `
                             <div class="sched-block" data-testid="schedule-block-${escapeHtml(b.task_id)}-${escapeHtml(b.start)}">
-                                <div class="block-time">${tStart} - ${tEnd}</div>
+                                <div class="block-time"><time>${tStart}</time> - <time>${tEnd}</time></div>
+                                <span class="timeline-node" aria-hidden="true"></span>
                                 <div class="block-details">
                                     <div class="block-title">${escapeHtml(b.task_title)}</div>
-                                    <div class="block-dur">${formatMinutes(b.scheduled_minutes)}</div>
+                                    <div class="block-dur">${formatMinutes(b.scheduled_minutes)} block</div>
                                 </div>
                             </div>
                         `;
@@ -625,13 +688,24 @@ function renderPlan() {
     
     const unfinContainer = document.getElementById("plan-unfinished");
     if (p.unfinished_tasks && p.unfinished_tasks.length > 0) {
+        const unfinishedTasks = p.unfinished_tasks.map(taskId => {
+            const task = state.analysis.tasks.find(candidate => candidate.task_id === taskId);
+            return { taskId, task };
+        });
+        const hasOnlyOptionalUnfinished = unfinishedTasks.every(({ task }) => task && task.is_optional);
         unfinContainer.classList.remove("hidden");
-        document.getElementById("unfinished-list").innerHTML = p.unfinished_tasks.map(t => {
-            const task = state.analysis.tasks.find(tk => tk.task_id === t);
-            return `<li>${escapeHtml(task ? task.title : t)}</li>`;
-        }).join("");
+        unfinContainer.classList.toggle("optional-only", hasOnlyOptionalUnfinished);
+        document.getElementById("unfinished-kicker").textContent = hasOnlyOptionalUnfinished ? "Optional work" : "Needs attention";
+        document.getElementById("unfinished-title").textContent = hasOnlyOptionalUnfinished ? "Optional work remaining" : "Unfinished tasks";
+        document.getElementById("unfinished-description").textContent = hasOnlyOptionalUnfinished
+            ? "These optional tasks could not be fully placed in the available time."
+            : "These tasks could not be fully placed in the available time.";
+        document.getElementById("unfinished-list").innerHTML = unfinishedTasks.map(({ taskId }) =>
+            `<li>${escapeHtml(taskTitleForId(taskId))}</li>`
+        ).join("");
     } else {
         unfinContainer.classList.add("hidden");
+        unfinContainer.classList.remove("optional-only");
     }
 }
 
@@ -728,6 +802,12 @@ function renderReplanResults() {
     const r = state.replanResult;
     const resultsContainer = document.getElementById("replan-results");
     resultsContainer.classList.remove("hidden");
+    const feasibilityLabels = {
+        comfortable: "Feasible",
+        tight: "At Risk",
+        at_risk: "At Risk",
+        infeasible: "Infeasible",
+    };
     
     const mandatoryTasks = (state.analysis && state.analysis.tasks) ? state.analysis.tasks.filter(t => !t.is_optional) : [];
     const prevHasUnfinishedMandatory = (state.plan && state.plan.unfinished_tasks) ? state.plan.unfinished_tasks.some(id =>
@@ -747,31 +827,43 @@ function renderReplanResults() {
 
     document.getElementById("replan-summary-metrics").innerHTML = `
         <div class="metric">
-            <div class="metric-label">Feasibility</div>
+            <div class="metric-label">Feasibility transition</div>
             <div class="metric-val">
-                <span class="status-badge conf-${r.previous_status}">${r.previous_status.replace("_", " ")}</span>
-                &rarr;
-                <span class="status-badge conf-${r.new_status}">${r.new_status.replace("_", " ")}</span>
+                <span class="status-badge status-${r.previous_status}">${feasibilityLabels[r.previous_status] || r.previous_status.replace(/_/g, " ")}</span>
+                <span class="transition-arrow" aria-hidden="true">&rarr;</span>
+                <span class="status-badge status-${r.new_status}">${feasibilityLabels[r.new_status] || r.new_status.replace(/_/g, " ")}</span>
             </div>
         </div>
         <div class="metric">
-            <div class="metric-label">Buffer</div>
-            <div class="metric-val">
-                ${prevBufferDisplay}
-                &rarr;
-                ${newBufferDisplay}
-            </div>
+            <div class="metric-label">Preserved blocks</div>
+            <div class="metric-val"><span class="metric-number">${r.preserved_block_count}</span><span class="metric-subtext">kept in place</span></div>
         </div>
         <div class="metric">
-            <div class="metric-label">Impact</div>
-            <div class="metric-val">${r.changed_block_count} blocks changed (${r.preserved_block_count} preserved)</div>
+            <div class="metric-label">Changed blocks</div>
+            <div class="metric-val"><span class="metric-number">${r.changed_block_count}</span><span class="metric-subtext">repaired</span></div>
+        </div>
+        <div class="metric">
+            <div class="metric-label">Deadline impact</div>
+            <div class="metric-val"><span>${prevBufferDisplay}</span><span class="transition-arrow" aria-hidden="true">&rarr;</span><span>${newBufferDisplay}</span></div>
         </div>
     `;
     
     const changesContainer = document.getElementById("replan-changes");
     if (r.changes && r.changes.length) {
-        changesContainer.innerHTML = r.changes.map(c => `
-            <div class="change-card" data-testid="change-card-${escapeHtml(c.task_id)}">
+        const chronologicalChanges = r.changes
+            .map((change, originalIndex) => ({ change, originalIndex }))
+            .sort((a, b) => {
+                const previousStart = ({ change }) => {
+                    const starts = change.old_blocks
+                        .map(block => new Date(block.start).getTime())
+                        .filter(Number.isFinite);
+                    return starts.length ? Math.min(...starts) : Infinity;
+                };
+                return previousStart(a) - previousStart(b) || a.originalIndex - b.originalIndex;
+            })
+            .map(({ change }) => change);
+        changesContainer.innerHTML = chronologicalChanges.map(c => `
+            <div class="change-card change-${c.change_type}" data-testid="change-card-${escapeHtml(c.task_id)}">
                 <div class="change-header">
                     <strong>${escapeHtml(c.task_title)}</strong>
                     <span class="change-badge type-${c.change_type}">${escapeHtml(c.change_type.replace(/_/g, " "))}</span>
@@ -783,7 +875,8 @@ function renderReplanResults() {
                             <div class="col-title">Previous</div>
                             ${c.old_blocks.length ? c.old_blocks.map(b => `<div>${formatDate(b.start)} ${formatTime(b.start)}-${formatTime(b.end)}</div>`).join("") : "<div>None</div>"}
                         </div>
-                        <div class="change-col">
+                        <div class="change-arrow" aria-hidden="true">&rarr;</div>
+                        <div class="change-col is-new">
                             <div class="col-title">New</div>
                             ${c.new_blocks.length ? c.new_blocks.map(b => `<div>${formatDate(b.start)} ${formatTime(b.start)}-${formatTime(b.end)}</div>`).join("") : "<div>None</div>"}
                         </div>
