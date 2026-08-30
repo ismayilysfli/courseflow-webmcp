@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CourseFlow</title>
+    <meta name="description" content="Coursework planning and execution scheduler that extracts tasks from assignment briefs and builds feasible schedules.">
+    <meta property="og:title" content="CourseFlow">
+    <meta property="og:description" content="Coursework planning and execution scheduler that extracts tasks from assignment briefs and builds feasible schedules.">
+    <link rel="stylesheet" href="/static/styles.css">
+    <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+</head>
+<body>
+    <div class="app-container" id="app">
+        <!-- Landing Page -->
+        <div id="landing-page" class="view-active">
+            <header class="top-nav">
+                <div class="logo">CourseFlow</div>
+            </header>
+            <main class="landing-main">
+                <h1 class="landing-headline">Turn coursework into an execution plan.</h1>
+                <p class="landing-subtext">Upload your assignment briefs and course documents. CourseFlow extracts what matters, estimates the workload, builds a feasible schedule, and repairs it when your availability changes.</p>
+                <div class="actions">
+                    <button id="btn-build-plan" class="button button-primary" data-testid="button-build-plan">Build my plan</button>
+                </div>
+            </main>
+            <footer class="footer">
+                <p>&copy; 2026 CourseFlow.</p>
+            </footer>
+        </div>
+
+        <!-- Workspace -->
+        <div id="workspace-page" class="view-hidden">
+            <header class="top-nav">
+                <div class="logo" role="button" tabindex="0" id="logo-home">CourseFlow</div>
+                <div class="workspace-nav">
+                    <button type="button" class="nav-step active" id="nav-step-docs" data-stage="stage-documents" data-testid="nav-documents">Documents</button>
+                    <button type="button" class="nav-step" id="nav-step-avail" data-stage="stage-availability" data-testid="nav-availability" disabled>Availability</button>
+                    <button type="button" class="nav-step" id="nav-step-plan" data-stage="stage-plan" data-testid="nav-plan" disabled>Plan</button>
+                    <button type="button" class="nav-step" id="nav-step-replan" data-stage="stage-replan" data-testid="nav-replan" disabled>Replan</button>
+                </div>
+            </header>
+
+            <main class="workspace-main">
+                <!-- Documents Stage -->
+                <section id="stage-documents" class="stage-active">
+                    <h2>Documents</h2>
+                    <p class="stage-desc">Upload up to 3 PDF assignment briefs to extract tasks, deadlines, and requirements.</p>
+
+                    <div class="upload-area" id="upload-area" tabindex="0" role="button" aria-label="Upload PDFs" data-testid="upload-area">
+                        <p>Click to select PDF files, or drag and drop (Max 3)</p>
+                        <input type="file" id="pdf-input" accept="application/pdf" multiple class="sr-only" data-testid="input-pdf">
+                    </div>
+                    
+                    <div id="file-list" class="file-list" data-testid="file-list"></div>
+                    <div id="doc-error" class="error-msg hidden" data-testid="error-doc"></div>
+                    
+                    <button id="btn-analyze" class="button button-primary" disabled data-testid="button-analyze">Analyze coursework</button>
+                    <div id="analyze-loading" class="loading-msg hidden" data-testid="loading-analyze" aria-live="polite">
+                        <span class="loading-dot" aria-hidden="true"></span>
+                        <span>Reading documents... Extracting requirements... Breaking work into tasks... Estimating workload...</span>
+                    </div>
+                    
+                    <div id="analysis-results" class="analysis-results hidden" data-testid="analysis-results">
+                        <div class="analysis-header">
+                            <h3 id="analysis-title" data-testid="analysis-title"></h3>
+                            <div class="analysis-meta">
+                                <span class="badge" id="analysis-deadline" data-testid="analysis-deadline"></span>
+                                <div id="analysis-deadline-evidence" class="deadline-evidence" data-testid="analysis-deadline-evidence"></div>
+                            </div>
+                        </div>
+                        
+                        <div class="analysis-section">
+                            <h4>Deliverables</h4>
+                            <ul id="analysis-deliverables" data-testid="analysis-deliverables"></ul>
+                        </div>
+                        <div class="analysis-section">
+                            <h4>Requirements</h4>
+                            <ul id="analysis-requirements" data-testid="analysis-requirements"></ul>
+                        </div>
+                        <div class="analysis-section">
+                            <h4>Ambiguities</h4>
+                            <ul id="analysis-ambiguities" data-testid="analysis-ambiguities"></ul>
+                        </div>
+                        
+                        <div class="analysis-section tasks-section">
+                            <div class="section-header">
+                                <h4>Generated Tasks</h4>
+                            <span class="note">AI-generated workload estimate</span>
+                            </div>
+                            <div id="analysis-tasks" class="task-grid" data-testid="analysis-tasks"></div>
+                        </div>
+                        
+                        <p class="estimate-note">Time estimates are approximate and are used to assess scheduling risk.</p>
+                        <div class="stage-actions">
+                            <button id="btn-next-availability" class="button button-secondary" data-testid="button-next-avail">Next: Set Availability</button>
+                        </div>
+                    </div>
+                </section>
+
+                <!-- Availability Stage -->
+                <section id="stage-availability" class="stage-hidden">
+                    <h2>Availability</h2>
+                    <p class="stage-desc">When are you available to work on this? Timezone: <span id="tz-display" data-testid="tz-display"></span></p>
+
+                    <div id="avail-list" class="avail-list" data-testid="avail-list"></div>
+                    
+                    <button id="btn-add-avail" class="button button-ghost" data-testid="button-add-avail">+ Add availability</button>
+                    
+                    <div id="avail-error" class="error-msg hidden" data-testid="error-avail"></div>
+
+                    <div class="stage-actions">
+                        <button id="btn-back-docs" class="button button-secondary" data-testid="button-back-docs">Back to Documents</button>
+                        <button id="btn-generate-plan" class="button button-primary" data-testid="button-generate-plan">Build execution plan</button>
+                    </div>
+                    <div id="plan-loading" class="loading-msg hidden" data-testid="loading-plan">Generating plan...</div>
+                </section>
+
+                <!-- Plan Stage -->
+                <section id="stage-plan" class="stage-hidden">
+                    <h2>Your Execution Plan</h2>
+                    
+                    <div id="plan-feasibility" class="feasibility-card" data-testid="plan-feasibility">
+                        <!-- Filled by JS -->
+                    </div>
+
+                    <div id="plan-schedule" class="schedule-container" data-testid="plan-schedule">
+                        <!-- Grouped by date -->
+                    </div>
+
+                    <div id="plan-unfinished" class="unfinished-container hidden" data-testid="plan-unfinished">
+                        <h3>Unfinished Tasks</h3>
+                        <ul id="unfinished-list"></ul>
+                    </div>
+
+                    <div class="stage-actions">
+                        <button id="btn-edit-avail" class="button button-secondary" data-testid="button-edit-avail">Edit availability</button>
+                    </div>
+                </section>
+
+                <!-- Replan Stage -->
+                <section id="stage-replan" class="stage-hidden">
+                    <h2>Edit Availability &amp; Replan</h2>
+                    <p class="stage-desc">Plans change. Update your availability and CourseFlow will repair the schedule.</p>
+
+                    <div id="replan-avail-list" class="avail-list" data-testid="replan-avail-list"></div>
+                    <button id="btn-add-replan-avail" class="button button-ghost" data-testid="button-add-replan-avail">+ Add availability</button>
+                    
+                    <div id="replan-error" class="error-msg hidden" data-testid="error-replan"></div>
+
+                    <div class="stage-actions">
+                        <button id="btn-cancel-replan" class="button button-secondary" data-testid="button-cancel-replan">Cancel</button>
+                        <button id="btn-execute-replan" class="button button-primary" data-testid="button-execute-replan">Repair my plan</button>
+                    </div>
+                    <div id="replan-loading" class="loading-msg hidden" data-testid="loading-replan">Recalculating plan...</div>
+
+                    <div id="replan-results" class="replan-results hidden" data-testid="replan-results">
+                        <h3>Replan Summary</h3>
+                        <div id="replan-summary-metrics" class="replan-metrics"></div>
+                        <div id="replan-changes" class="replan-changes"></div>
+                        
+                        <div class="stage-actions">
+                            <button id="btn-accept-replan" class="button button-primary" data-testid="button-accept-replan">Accept &amp; View Updated Schedule</button>
+                        </div>
+                    </div>
+                </section>
+            </main>
+            <aside id="activity-log" class="activity-log hidden" aria-live="polite" data-testid="activity-log">
+                <h3>Activity</h3>
+                <ul id="activity-items"></ul>
+            </aside>
+        </div>
+    </div>
+    
+    <script src="/static/app.js"></script>
+</body>
+</html>

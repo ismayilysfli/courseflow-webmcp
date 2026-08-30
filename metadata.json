@@ -1,0 +1,6 @@
+{
+  "name": "CourseFlow",
+  "description": "Coursework planning and execution scheduler that extracts tasks from assignment briefs and builds feasible schedules.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

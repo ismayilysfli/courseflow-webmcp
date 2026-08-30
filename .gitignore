@@ -1,0 +1,14 @@
+.env
+.env.*
+__pycache__/
+*.pyc
+.pytest_cache/
+.cache/
+.venv/
+venv/
+uploads/
+tmp/
+*.key
+*.pem
+*.crt
+.replit-artifact/
