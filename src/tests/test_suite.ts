@@ -11,6 +11,10 @@ import {
   normalizeAnalysis,
 } from '../services/planner.js';
 import { replan } from '../services/replanner.js';
+import {
+  buildPlanCreatedEvent,
+  buildPlanReplannedEvent,
+} from '../services/firestoreService.js';
 
 const BASE_TIME = new Date('2026-08-28T10:00:00.000Z');
 
@@ -395,6 +399,36 @@ console.log('Running Replanner Tests...');
 
   // No misleading "Deadline buffer increased" warning when mandatory work is unfinished
   assert(!result.warnings.some((w) => w.toLowerCase().includes('buffer increased')));
+}
+
+// 19. Firestore audit events contain only plan metadata
+{
+  const analysis = makeAnalysis([makeTask('Audit task', { expected: 60 })]);
+  const plan = buildPlan(analysis, [window(120)]);
+  const planEvent = buildPlanCreatedEvent(analysis, plan);
+
+  assert.deepStrictEqual(planEvent, {
+    event_type: 'plan_created',
+    assignment_title: 'Planner test',
+    feasibility: plan.feasibility.status,
+    available_minutes: 120,
+    expected_workload_minutes: 60,
+    unfinished_task_count: 0,
+  });
+
+  const replanned = replan(analysis, plan, [window(30)]);
+  const replanEvent = buildPlanReplannedEvent(analysis, replanned);
+
+  assert.deepStrictEqual(replanEvent, {
+    event_type: 'plan_replanned',
+    assignment_title: 'Planner test',
+    previous_feasibility: plan.feasibility.status,
+    new_feasibility: replanned.feasibility.status,
+    preserved_block_count: replanned.preserved_block_count,
+    changed_block_count: replanned.changed_block_count,
+    unfinished_task_count: replanned.unfinished_tasks.length,
+  });
+  assert(!('source_snippet' in planEvent));
 }
 
 console.log('All Planner and Replanner tests passed successfully!');
