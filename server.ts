@@ -17,6 +17,10 @@ import {
 } from './src/services/planner.js';
 import { replan } from './src/services/replanner.js';
 import {
+  recordPlanCreated,
+  recordPlanReplanned,
+} from './src/services/firestoreService.js';
+import {
   DocumentProcessingError,
   extractPdfPages,
   formatPageBlocks,
@@ -214,6 +218,7 @@ app.post('/api/plan', (req: Request, res: Response) => {
     const analysis = payload.analysis as AssignmentAnalysis;
     const availability = payload.availability as AvailabilityWindow[];
     const result = buildPlan(analysis, availability);
+    recordPlanCreated(analysis, result);
     res.json(result);
   } catch (err: any) {
     if (err instanceof PlannerError) {
@@ -249,6 +254,7 @@ app.post('/api/replan', (req: Request, res: Response) => {
     const previousPlan = payload.previous_plan as PlanResult;
     const newAvailability = payload.new_availability as AvailabilityWindow[];
     const result = replan(analysis, previousPlan, newAvailability);
+    recordPlanReplanned(analysis, result);
     res.json(result);
   } catch (err: any) {
     if (err instanceof PlannerError) {
