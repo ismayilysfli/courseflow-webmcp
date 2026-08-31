@@ -15,6 +15,12 @@ import {
   buildPlanCreatedEvent,
   buildPlanReplannedEvent,
 } from '../services/firestoreService.js';
+import {
+  SourceReferenceError,
+  assignmentAnalysisSchema,
+  parseGeminiAnalysis,
+  validateSourceReferences,
+} from '../agent/courseAgent.js';
 
 const BASE_TIME = new Date('2026-08-28T10:00:00.000Z');
 
@@ -73,6 +79,92 @@ function window(minutes: number, start: Date = BASE_TIME): AvailabilityWindow {
     start: start.toISOString(),
     end: end.toISOString(),
   };
+}
+
+console.log('Running Gemini Evidence Tests...');
+
+// Gemini's structured output schema requires every evidence container that
+// CourseFlow relies on during source-reference validation.
+{
+  const schema = assignmentAnalysisSchema as any;
+  const required = new Set(schema.required);
+  assert(required.has('deadline_evidence'));
+  assert(required.has('deliverable_evidence'));
+  assert(required.has('requirement_evidence'));
+
+  const evidenceBackedFact = schema.properties.deliverable_evidence.items;
+  assert(evidenceBackedFact.required.includes('evidence'));
+  assert(
+    schema.properties.requirement_evidence.items.required.includes('evidence')
+  );
+
+  const taskEstimate = schema.properties.tasks.items;
+  assert(taskEstimate.required.includes('evidence'));
+
+  const sourceEvidence = evidenceBackedFact.properties.evidence.items;
+  assert(sourceEvidence.required.includes('source_file'));
+  assert(sourceEvidence.required.includes('page_number'));
+  assert(sourceEvidence.required.includes('source_snippet'));
+}
+
+const sourceEvidence = {
+  source_file: 'assignment.pdf',
+  page_number: 1,
+  source_snippet: 'Submit report.pdf by September 10.',
+};
+
+const validEvidenceAnalysis: AssignmentAnalysis = {
+  title: 'Evidence test',
+  deadline: 'September 10',
+  deadline_iso: null,
+  deadline_evidence: [sourceEvidence],
+  deliverables: ['report.pdf'],
+  deliverable_evidence: [
+    { fact: 'report.pdf', evidence: [sourceEvidence] },
+  ],
+  requirements: ['Include a methodology section'],
+  requirement_evidence: [
+    { fact: 'Include a methodology section', evidence: [sourceEvidence] },
+  ],
+  ambiguities: [],
+  tasks: [
+    {
+      ...makeTask('Write methodology'),
+      source_requirement: 'Include a methodology section',
+      evidence: [sourceEvidence],
+    },
+  ],
+};
+
+// JSON that is otherwise well-formed but lacks evidence for a claimed
+// deliverable is rejected inside Gemini response handling, allowing fallback.
+{
+  const incomplete = {
+    ...validEvidenceAnalysis,
+    deliverable_evidence: [],
+  };
+  assert.throws(
+    () => parseGeminiAnalysis(JSON.stringify(incomplete), true),
+    (error: unknown) =>
+      error instanceof SourceReferenceError &&
+      error.message.includes('report.pdf')
+  );
+}
+
+// An existing valid, fully grounded response remains accepted by both the
+// response handler and the strict source-reference validator.
+{
+  const parsed = parseGeminiAnalysis(
+    JSON.stringify(validEvidenceAnalysis),
+    true
+  );
+  assert.deepStrictEqual(parsed, validEvidenceAnalysis);
+  assert.doesNotThrow(() =>
+    validateSourceReferences(
+      parsed,
+      new Map([['assignment.pdf', new Set([1])]])
+    )
+  );
 }
 
 console.log('Running Planner Tests...');
