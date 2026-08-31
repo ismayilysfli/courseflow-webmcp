@@ -17,10 +17,10 @@ const sourceEvidenceSchema = {
   type: Type.OBJECT,
   properties: {
     source_file: { type: Type.STRING },
-    page_number: { type: Type.INTEGER, nullable: true },
+    page_number: { type: Type.INTEGER },
     source_snippet: { type: Type.STRING },
   },
-  required: ['source_file', 'source_snippet'],
+  required: ['source_file', 'page_number', 'source_snippet'],
 };
 
 const evidenceBackedFactSchema = {
@@ -33,7 +33,7 @@ const evidenceBackedFactSchema = {
       items: sourceEvidenceSchema,
     },
   },
-  required: ['fact'],
+  required: ['fact', 'evidence'],
 };
 
 const taskEstimateSchema = {
@@ -75,10 +75,11 @@ const taskEstimateSchema = {
     'confidence',
     'estimation_reason',
     'is_optional',
+    'evidence',
   ],
 };
 
-const assignmentAnalysisSchema = {
+export const assignmentAnalysisSchema = {
   type: Type.OBJECT,
   properties: {
     title: { type: Type.STRING },
@@ -113,7 +114,16 @@ const assignmentAnalysisSchema = {
       items: taskEstimateSchema,
     },
   },
-  required: ['title', 'deliverables', 'requirements', 'ambiguities', 'tasks'],
+  required: [
+    'title',
+    'deadline_evidence',
+    'deliverables',
+    'deliverable_evidence',
+    'requirements',
+    'requirement_evidence',
+    'ambiguities',
+    'tasks',
+  ],
 };
 
 function getGenAI(): GoogleGenAI {
@@ -134,7 +144,94 @@ function getGenAI(): GoogleGenAI {
 
 const MODELS = ['gemini-3.7-flash', 'gemini-3.5-flash', 'gemini-3.5-flash-lite'];
 
-async function runGeminiWithRetry(prompt: string): Promise<AssignmentAnalysis> {
+export function validateEvidenceCompleteness(
+  analysis: AssignmentAnalysis
+): void {
+  if (
+    analysis.deadline !== null &&
+    analysis.deadline !== undefined &&
+    (!analysis.deadline_evidence || analysis.deadline_evidence.length === 0)
+  ) {
+    throw new SourceReferenceError(
+      'The extracted deadline did not include source evidence.'
+    );
+  }
+
+  const deliverableEvidence = new Map<string, SourceEvidence[]>();
+  for (const sourcedFact of analysis.deliverable_evidence || []) {
+    deliverableEvidence.set(sourcedFact.fact, sourcedFact.evidence || []);
+  }
+
+  for (const deliverable of analysis.deliverables || []) {
+    const evidence = deliverableEvidence.get(deliverable);
+    if (!evidence || evidence.length === 0) {
+      throw new SourceReferenceError(
+        `The deliverable ${JSON.stringify(deliverable)} did not include source evidence.`
+      );
+    }
+  }
+
+  const requirementEvidence = new Map<string, SourceEvidence[]>();
+  for (const sourcedFact of analysis.requirement_evidence || []) {
+    requirementEvidence.set(sourcedFact.fact, sourcedFact.evidence || []);
+  }
+
+  for (const requirement of analysis.requirements || []) {
+    const evidence = requirementEvidence.get(requirement);
+    if (!evidence || evidence.length === 0) {
+      throw new SourceReferenceError(
+        `The requirement ${JSON.stringify(requirement)} did not include source evidence.`
+      );
+    }
+  }
+
+  for (const task of analysis.tasks || []) {
+    if (task.source_requirement && (!task.evidence || task.evidence.length === 0)) {
+      throw new SourceReferenceError(
+        `The task ${JSON.stringify(task.title)} did not include source evidence.`
+      );
+    }
+  }
+}
+
+export function parseGeminiAnalysis(
+  text: string,
+  requireSourceEvidence: boolean
+): AssignmentAnalysis {
+  const parsed: AssignmentAnalysis = JSON.parse(text);
+
+  if (requireSourceEvidence) {
+    validateEvidenceCompleteness(parsed);
+  }
+
+  // Validate estimate order: optimistic <= expected <= pessimistic
+  if (parsed.tasks) {
+    for (const task of parsed.tasks) {
+      if (
+        !(
+          task.optimistic_minutes <= task.expected_minutes &&
+          task.expected_minutes <= task.pessimistic_minutes
+        )
+      ) {
+        const sorted = [
+          task.optimistic_minutes,
+          task.expected_minutes,
+          task.pessimistic_minutes,
+        ].sort((a, b) => a - b);
+        task.optimistic_minutes = sorted[0];
+        task.expected_minutes = sorted[1];
+        task.pessimistic_minutes = sorted[2];
+      }
+    }
+  }
+
+  return parsed;
+}
+
+async function runGeminiWithRetry(
+  prompt: string,
+  requireSourceEvidence: boolean
+): Promise<AssignmentAnalysis> {
   const ai = getGenAI();
   let lastError: any = null;
 
@@ -156,28 +253,7 @@ async function runGeminiWithRetry(prompt: string): Promise<AssignmentAnalysis> {
         throw new Error('Gemini returned an empty response.');
       }
 
-      const parsed: AssignmentAnalysis = JSON.parse(text);
-
-      // Validate estimate order: optimistic <= expected <= pessimistic
-      if (parsed.tasks) {
-        for (const task of parsed.tasks) {
-          if (
-            !(
-              task.optimistic_minutes <= task.expected_minutes &&
-              task.expected_minutes <= task.pessimistic_minutes
-            )
-          ) {
-            const sorted = [
-              task.optimistic_minutes,
-              task.expected_minutes,
-              task.pessimistic_minutes,
-            ].sort((a, b) => a - b);
-            task.optimistic_minutes = sorted[0];
-            task.expected_minutes = sorted[1];
-            task.pessimistic_minutes = sorted[2];
-          }
-        }
-      }
+      const parsed = parseGeminiAnalysis(text, requireSourceEvidence);
 
       console.log(`[courseAgent] Assignment analysis succeeded using model: ${model}`);
       return parsed;
@@ -206,13 +282,13 @@ async function runGeminiWithRetry(prompt: string): Promise<AssignmentAnalysis> {
 export async function analyzeAssignment(
   assignmentText: string
 ): Promise<AssignmentAnalysis> {
-  return runGeminiWithRetry(buildAssignmentPrompt(assignmentText));
+  return runGeminiWithRetry(buildAssignmentPrompt(assignmentText), false);
 }
 
 export async function analyzeAssignmentPages(
   pageBlocks: string
 ): Promise<AssignmentAnalysis> {
-  return runGeminiWithRetry(buildPdfAssignmentPrompt(pageBlocks));
+  return runGeminiWithRetry(buildPdfAssignmentPrompt(pageBlocks), true);
 }
 
 export function validateSourceReferences(
@@ -245,45 +321,5 @@ export function validateSourceReferences(
     }
   }
 
-  if (analysis.deadline !== null && analysis.deadline !== undefined && (!analysis.deadline_evidence || analysis.deadline_evidence.length === 0)) {
-    throw new SourceReferenceError(
-      'The extracted deadline did not include source evidence.'
-    );
-  }
-
-  const deliverableEvidence = new Map<string, SourceEvidence[]>();
-  for (const sourcedFact of analysis.deliverable_evidence || []) {
-    deliverableEvidence.set(sourcedFact.fact, sourcedFact.evidence || []);
-  }
-
-  for (const deliverable of analysis.deliverables || []) {
-    const ev = deliverableEvidence.get(deliverable);
-    if (!ev || ev.length === 0) {
-      throw new SourceReferenceError(
-        `The deliverable ${JSON.stringify(deliverable)} did not include source evidence.`
-      );
-    }
-  }
-
-  const reqEvidence = new Map<string, SourceEvidence[]>();
-  for (const sourcedFact of analysis.requirement_evidence || []) {
-    reqEvidence.set(sourcedFact.fact, sourcedFact.evidence || []);
-  }
-
-  for (const requirement of analysis.requirements || []) {
-    const ev = reqEvidence.get(requirement);
-    if (!ev || ev.length === 0) {
-      throw new SourceReferenceError(
-        `The requirement ${JSON.stringify(requirement)} did not include source evidence.`
-      );
-    }
-  }
-
-  for (const task of analysis.tasks || []) {
-    if (task.source_requirement && (!task.evidence || task.evidence.length === 0)) {
-      throw new SourceReferenceError(
-        `The task ${JSON.stringify(task.title)} did not include source evidence.`
-      );
-    }
-  }
+  validateEvidenceCompleteness(analysis);
 }
