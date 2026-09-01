@@ -751,15 +751,14 @@ document.getElementById("btn-add-replan-avail").addEventListener("click", () => 
 
 document.getElementById("btn-cancel-replan").addEventListener("click", () => showStage("stage-plan"));
 
-document.getElementById("btn-execute-replan").addEventListener("click", async () => {
-    const errorMsg = validateAvailability(state.replanAvailability);
-    if (errorMsg) {
-        showError("replan-error", errorMsg);
-        return;
+async function createReplanPreviewFromCurrentState(requestVersion = state.workflowVersion) {
+    if (!state.analysis) {
+        throw new Error("Coursework must be analyzed before a plan can be repaired.");
     }
-    hideError("replan-error");
-    const requestVersion = state.workflowVersion;
-    
+    if (!state.plan) {
+        throw new Error("An accepted execution plan is required before replanning.");
+    }
+
     const payload = {
         analysis: state.analysis,
         previous_plan: state.plan,
@@ -771,7 +770,7 @@ document.getElementById("btn-execute-replan").addEventListener("click", async ()
     
     document.getElementById("btn-execute-replan").disabled = true;
     document.getElementById("replan-loading").classList.remove("hidden");
-    
+
     try {
         const res = await apiFetch("/api/replan", {
             method: "POST",
@@ -792,8 +791,8 @@ document.getElementById("btn-execute-replan").addEventListener("click", async ()
                 "CourseFlow could not repair the plan. Check the updated availability and try again."
             ));
         }
-        if (requestVersion !== state.workflowVersion) return;
-        
+        if (requestVersion !== state.workflowVersion) return null;
+
         state.replanResult = data;
         renderReplanResults();
         const affectedTasks = data.changes.filter(
@@ -803,17 +802,32 @@ document.getElementById("btn-execute-replan").addEventListener("click", async ()
         addActivity(`Preserved ${data.preserved_block_count} valid block${data.preserved_block_count === 1 ? "" : "s"}`);
         addActivity(`Replanned ${affectedTasks} affected task${affectedTasks === 1 ? "" : "s"}`);
         addActivity(`Rechecked deadline risk: ${data.new_status.replace("_", " ")}`);
+        return data;
+    } finally {
+        if (requestVersion === state.workflowVersion) {
+            document.getElementById("btn-execute-replan").disabled = false;
+            document.getElementById("replan-loading").classList.add("hidden");
+        }
+    }
+}
+
+document.getElementById("btn-execute-replan").addEventListener("click", async () => {
+    const errorMsg = validateAvailability(state.replanAvailability);
+    if (errorMsg) {
+        showError("replan-error", errorMsg);
+        return;
+    }
+    hideError("replan-error");
+    const requestVersion = state.workflowVersion;
+
+    try {
+        await createReplanPreviewFromCurrentState(requestVersion);
     } catch (err) {
         if (requestVersion !== state.workflowVersion) return;
         showError(
             "replan-error",
             err.message || "CourseFlow could not repair the plan. Check the updated availability and try again."
         );
-    } finally {
-        if (requestVersion === state.workflowVersion) {
-            document.getElementById("btn-execute-replan").disabled = false;
-            document.getElementById("replan-loading").classList.add("hidden");
-        }
     }
 });
 
@@ -1107,20 +1121,22 @@ function setAvailabilityForAgent(windows) {
     };
 }
 
-function executionPlanForAgent(plan) {
+function unfinishedMandatoryWorkForAgent(taskIds) {
     const tasks = state.analysis && Array.isArray(state.analysis.tasks)
         ? state.analysis.tasks
         : [];
     const mandatoryTasks = new Map(
         tasks.filter(task => !task.is_optional).map(task => [task.task_id, task])
     );
-    const unfinishedMandatoryWork = (Array.isArray(plan.unfinished_tasks) ? plan.unfinished_tasks : [])
+    return (Array.isArray(taskIds) ? taskIds : [])
         .filter(taskId => mandatoryTasks.has(taskId))
         .map(taskId => ({
             task_id: taskId,
             title: mandatoryTasks.get(taskId).title,
         }));
+}
 
+function executionPlanForAgent(plan) {
     return {
         status: "created",
         feasibility: {
@@ -1135,7 +1151,7 @@ function executionPlanForAgent(plan) {
             buffer_minutes: plan.deadline_buffer_minutes,
         },
         warnings: Array.isArray(plan.warnings) ? plan.warnings : [],
-        unfinished_mandatory_work: unfinishedMandatoryWork,
+        unfinished_mandatory_work: unfinishedMandatoryWorkForAgent(plan.unfinished_tasks),
         scheduled_blocks: (Array.isArray(plan.scheduled_blocks) ? plan.scheduled_blocks : []).map(block => ({
             task_id: block.task_id,
             task_title: block.task_title,
@@ -1181,6 +1197,106 @@ async function createExecutionPlanForAgent() {
         if (requestVersion === state.workflowVersion) showError("avail-error", message);
         return {
             status: "error",
+            message,
+        };
+    }
+}
+
+function replanPreviewForAgent(result) {
+    return {
+        status: "preview_ready",
+        feasibility: {
+            previous_status: result.previous_status,
+            new_status: result.new_status,
+        },
+        availability: {
+            previous_total_minutes: state.plan.feasibility.available_minutes,
+            proposed_total_minutes: result.feasibility.available_minutes,
+        },
+        schedule_changes: {
+            preserved_block_count: result.preserved_block_count,
+            changed_block_count: result.changed_block_count,
+        },
+        deadline: {
+            previous_buffer_minutes: result.previous_deadline_buffer_minutes,
+            new_buffer_minutes: result.new_deadline_buffer_minutes,
+        },
+        warnings: Array.isArray(result.warnings) ? result.warnings : [],
+        unfinished_mandatory_work: unfinishedMandatoryWorkForAgent(result.unfinished_tasks),
+        changes: (Array.isArray(result.changes) ? result.changes : []).map(change => ({
+            task_id: change.task_id,
+            task_title: change.task_title,
+            change_type: change.change_type,
+            reason: change.reason,
+        })),
+        awaiting_human_acceptance: true,
+        message: "Created and displayed a replan preview in CourseFlow. The accepted availability and plan are unchanged until the human reviews and accepts this preview.",
+    };
+}
+
+async function replanCourseworkForAgent(windows) {
+    if (!state.analysis) {
+        return {
+            status: "not_ready",
+            message: "No coursework has been analyzed yet. The human must upload and analyze a PDF first.",
+        };
+    }
+    if (!state.plan) {
+        return {
+            status: "not_ready",
+            message: "No accepted execution plan exists yet. Run create_execution_plan before requesting a replan preview.",
+        };
+    }
+
+    let normalized;
+    try {
+        normalized = normalizeAgentAvailabilityWindows(windows);
+    } catch (error) {
+        return {
+            status: "invalid_availability",
+            availability_unchanged: true,
+            plan_unchanged: true,
+            message: error.message || "The proposed availability windows are invalid.",
+        };
+    }
+
+    const previousPreviewAvailability = JSON.parse(JSON.stringify(state.replanAvailability));
+    const previousPreviewResult = state.replanResult;
+    state.replanAvailability = normalized.rows.map(row => ({ ...row }));
+    state.replanResult = null;
+    renderAvailabilityList("replan-avail-list", state.replanAvailability, true);
+    document.getElementById("replan-results").classList.add("hidden");
+    hideError("replan-error");
+    showStage("stage-replan");
+
+    const requestVersion = state.workflowVersion;
+    try {
+        const result = await createReplanPreviewFromCurrentState(requestVersion);
+        if (!result) {
+            return {
+                status: "cancelled",
+                message: "Replanning was cancelled because the CourseFlow workflow changed.",
+            };
+        }
+        return replanPreviewForAgent(result);
+    } catch (error) {
+        const message = error.message || "CourseFlow could not create the replan preview.";
+        if (requestVersion === state.workflowVersion) {
+            state.replanAvailability = previousPreviewAvailability;
+            state.replanResult = previousPreviewResult;
+            renderAvailabilityList("replan-avail-list", state.replanAvailability, true);
+            if (state.replanResult) {
+                renderReplanResults();
+            } else {
+                document.getElementById("replan-results").classList.add("hidden");
+            }
+            showError("replan-error", message);
+            showStage("stage-replan");
+        }
+        return {
+            status: "error",
+            availability_unchanged: true,
+            plan_unchanged: true,
             message,
         };
     }
@@ -1256,6 +1372,40 @@ async function registerCourseFlowWebMcpTools() {
             additionalProperties: false,
         },
         execute: async () => createExecutionPlanForAgent(),
+    });
+
+    await registerCourseFlowWebMcpTool({
+        name: "replan_coursework",
+        description: "Propose replacement availability and generate a CourseFlow replan preview for an existing accepted execution plan. This updates the Replan review UI but does not change the active availability or plan until the human explicitly accepts the preview.",
+        inputSchema: {
+            type: "object",
+            properties: {
+                windows: {
+                    type: "array",
+                    minItems: 1,
+                    items: {
+                        type: "object",
+                        properties: {
+                            start: {
+                                type: "string",
+                                format: "date-time",
+                                description: "Timezone-aware ISO date-time for the start of a same-day, minute-aligned proposed availability window.",
+                            },
+                            end: {
+                                type: "string",
+                                format: "date-time",
+                                description: "Timezone-aware ISO date-time after start for the end of the same-day, minute-aligned proposed window.",
+                            },
+                        },
+                        required: ["start", "end"],
+                        additionalProperties: false,
+                    },
+                },
+            },
+            required: ["windows"],
+            additionalProperties: false,
+        },
+        execute: async (input = {}) => replanCourseworkForAgent(input.windows),
     });
 }
 
