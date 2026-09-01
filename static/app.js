@@ -475,6 +475,14 @@ document.getElementById("btn-next-availability").addEventListener("click", () =>
 const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
 document.getElementById("tz-display").textContent = tz || "Local Time";
 
+function invalidatePlanAfterAvailabilityChange() {
+    state.plan = null;
+    state.replanAvailability = [];
+    state.replanResult = null;
+    document.getElementById("replan-results").classList.add("hidden");
+    updateNavigationAccess();
+}
+
 function renderAvailabilityList(containerId, dataArray, isReplan = false) {
     const container = document.getElementById(containerId);
     container.innerHTML = dataArray.map((avail, index) => `
@@ -502,7 +510,7 @@ function renderAvailabilityList(containerId, dataArray, isReplan = false) {
     container.querySelectorAll(".avail-row").forEach(row => {
         const idx = parseInt(row.getAttribute("data-index"));
         const stateArr = isReplan ? state.replanAvailability : state.availability;
-        
+
         row.querySelector(".avail-date").addEventListener("change", (e) => stateArr[idx].date = e.target.value);
         row.querySelector(".avail-start").addEventListener("change", (e) => stateArr[idx].start = e.target.value);
         row.querySelector(".avail-end").addEventListener("change", (e) => stateArr[idx].end = e.target.value);
@@ -539,15 +547,11 @@ function validateAvailability(availArray) {
     return null;
 }
 
-document.getElementById("btn-generate-plan").addEventListener("click", async () => {
-    const errorMsg = validateAvailability(state.availability);
-    if (errorMsg) {
-        showError("avail-error", errorMsg);
-        return;
+async function createExecutionPlanFromCurrentState(requestVersion = state.workflowVersion) {
+    if (!state.analysis) {
+        throw new Error("Coursework must be analyzed before an execution plan can be created.");
     }
-    hideError("avail-error");
-    const requestVersion = state.workflowVersion;
-    
+
     const payload = {
         analysis: state.analysis,
         availability: state.availability.map(a => ({
@@ -558,7 +562,7 @@ document.getElementById("btn-generate-plan").addEventListener("click", async () 
     
     document.getElementById("btn-generate-plan").disabled = true;
     document.getElementById("plan-loading").classList.remove("hidden");
-    
+
     try {
         const res = await apiFetch("/api/plan", {
             method: "POST",
@@ -579,25 +583,40 @@ document.getElementById("btn-generate-plan").addEventListener("click", async () 
                 "CourseFlow could not build the plan. Check your availability and try again."
             ));
         }
-        if (requestVersion !== state.workflowVersion) return;
-        
+        if (requestVersion !== state.workflowVersion) return null;
+
         state.plan = data;
         renderPlan();
         updateNavigationAccess();
         addActivity(`Checked schedule feasibility: ${data.feasibility.status.replace("_", " ")}`);
         addActivity(`Built an execution plan with ${data.scheduled_blocks.length} scheduled block${data.scheduled_blocks.length === 1 ? "" : "s"}`);
         showStage("stage-plan");
+        return data;
+    } finally {
+        if (requestVersion === state.workflowVersion) {
+            document.getElementById("btn-generate-plan").disabled = false;
+            document.getElementById("plan-loading").classList.add("hidden");
+        }
+    }
+}
+
+document.getElementById("btn-generate-plan").addEventListener("click", async () => {
+    const errorMsg = validateAvailability(state.availability);
+    if (errorMsg) {
+        showError("avail-error", errorMsg);
+        return;
+    }
+    hideError("avail-error");
+    const requestVersion = state.workflowVersion;
+
+    try {
+        await createExecutionPlanFromCurrentState(requestVersion);
     } catch (err) {
         if (requestVersion !== state.workflowVersion) return;
         showError(
             "avail-error",
             err.message || "CourseFlow could not build the plan. Check your availability and try again."
         );
-    } finally {
-        if (requestVersion === state.workflowVersion) {
-            document.getElementById("btn-generate-plan").disabled = false;
-            document.getElementById("plan-loading").classList.add("hidden");
-        }
     }
 });
 
@@ -948,28 +967,296 @@ function courseworkAnalysisForAgent() {
     };
 }
 
+function parseAgentAvailabilityDateTime(value, label) {
+    if (typeof value !== "string") {
+        throw new Error(`${label} must be an ISO date-time string.`);
+    }
+
+    const trimmed = value.trim();
+    const match = trimmed.match(
+        /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.(\d+))?)?(Z|[+-]\d{2}:\d{2})$/
+    );
+    if (!match) {
+        throw new Error(`${label} must be a timezone-aware ISO date-time.`);
+    }
+
+    const [, yearText, monthText, dayText, hourText, minuteText, secondText = "0", fractionText = ""] = match;
+    const year = Number(yearText);
+    const month = Number(monthText);
+    const day = Number(dayText);
+    const hour = Number(hourText);
+    const minute = Number(minuteText);
+    const second = Number(secondText);
+    const wallClock = new Date(Date.UTC(year, month - 1, day, hour, minute, second));
+
+    if (
+        wallClock.getUTCFullYear() !== year ||
+        wallClock.getUTCMonth() !== month - 1 ||
+        wallClock.getUTCDate() !== day ||
+        wallClock.getUTCHours() !== hour ||
+        wallClock.getUTCMinutes() !== minute ||
+        wallClock.getUTCSeconds() !== second
+    ) {
+        throw new Error(`${label} contains an invalid calendar date or time.`);
+    }
+    if (second !== 0 || /[1-9]/.test(fractionText)) {
+        throw new Error(`${label} must be aligned to a whole minute.`);
+    }
+
+    const instantMilliseconds = Date.parse(trimmed);
+    if (!Number.isFinite(instantMilliseconds)) {
+        throw new Error(`${label} is not a valid ISO date-time.`);
+    }
+
+    return {
+        instantMilliseconds,
+        date: `${yearText}-${monthText}-${dayText}`,
+        time: `${hourText}:${minuteText}`,
+    };
+}
+
+function normalizeAgentAvailabilityWindows(windows) {
+    if (!Array.isArray(windows) || windows.length === 0) {
+        throw new Error("At least one availability window is required.");
+    }
+
+    const rows = [];
+    const normalizedWindows = [];
+    const normalizedIntervals = [];
+
+    windows.forEach((window, index) => {
+        if (!window || typeof window !== "object" || Array.isArray(window)) {
+            throw new Error(`Window ${index + 1} must be an object with start and end.`);
+        }
+
+        const start = parseAgentAvailabilityDateTime(window.start, `Window ${index + 1} start`);
+        const end = parseAgentAvailabilityDateTime(window.end, `Window ${index + 1} end`);
+        if (end.instantMilliseconds <= start.instantMilliseconds) {
+            throw new Error(`Window ${index + 1} end must occur after its start.`);
+        }
+        if (start.date !== end.date) {
+            throw new Error(`Window ${index + 1} must start and end on the same local date.`);
+        }
+
+        const row = { date: start.date, start: start.time, end: end.time };
+        const rowError = validateAvailability([row]);
+        if (rowError) {
+            throw new Error(`Window ${index + 1}: ${rowError.replace(/^Row 1:\s*/, "")}`);
+        }
+
+        const normalizedStart = formatToIso(row.date, row.start);
+        const normalizedEnd = formatToIso(row.date, row.end);
+        const normalizedStartMilliseconds = new Date(normalizedStart).getTime();
+        const normalizedEndMilliseconds = new Date(normalizedEnd).getTime();
+        const durationMinutes = (normalizedEndMilliseconds - normalizedStartMilliseconds) / 60000;
+        rows.push(row);
+        normalizedIntervals.push({
+            start: normalizedStartMilliseconds,
+            end: normalizedEndMilliseconds,
+        });
+        normalizedWindows.push({
+            start: normalizedStart,
+            end: normalizedEnd,
+            local_date: row.date,
+            local_start: row.start,
+            local_end: row.end,
+            duration_minutes: durationMinutes,
+        });
+    });
+
+    normalizedIntervals.sort((a, b) => a.start - b.start);
+    let totalAvailableMinutes = 0;
+    let mergedEnd = null;
+    for (const interval of normalizedIntervals) {
+        if (mergedEnd === null || interval.start > mergedEnd) {
+            totalAvailableMinutes += (interval.end - interval.start) / 60000;
+            mergedEnd = interval.end;
+        } else if (interval.end > mergedEnd) {
+            totalAvailableMinutes += (interval.end - mergedEnd) / 60000;
+            mergedEnd = interval.end;
+        }
+    }
+
+    return { rows, normalizedWindows, totalAvailableMinutes };
+}
+
+function setAvailabilityForAgent(windows) {
+    let normalized;
+    try {
+        normalized = normalizeAgentAvailabilityWindows(windows);
+    } catch (error) {
+        return {
+            status: "invalid_availability",
+            availability_unchanged: true,
+            message: error.message || "The availability windows are invalid.",
+        };
+    }
+
+    const replacedStalePlan = Boolean(state.plan || state.replanResult);
+    state.availability = normalized.rows.map(row => ({ ...row }));
+    invalidatePlanAfterAvailabilityChange();
+    renderAvailabilityList("avail-list", state.availability, false);
+    hideError("avail-error");
+    if (state.analysis) showStage("stage-availability");
+
+    return {
+        status: "updated",
+        availability: normalized.normalizedWindows,
+        total_available_minutes: normalized.totalAvailableMinutes,
+        message: `Set ${state.availability.length} availability window${state.availability.length === 1 ? "" : "s"} in CourseFlow${replacedStalePlan ? " and cleared the stale plan" : ""}.`,
+    };
+}
+
+function executionPlanForAgent(plan) {
+    const tasks = state.analysis && Array.isArray(state.analysis.tasks)
+        ? state.analysis.tasks
+        : [];
+    const mandatoryTasks = new Map(
+        tasks.filter(task => !task.is_optional).map(task => [task.task_id, task])
+    );
+    const unfinishedMandatoryWork = (Array.isArray(plan.unfinished_tasks) ? plan.unfinished_tasks : [])
+        .filter(taskId => mandatoryTasks.has(taskId))
+        .map(taskId => ({
+            task_id: taskId,
+            title: mandatoryTasks.get(taskId).title,
+        }));
+
+    return {
+        status: "created",
+        feasibility: {
+            status: plan.feasibility.status,
+            available_minutes: plan.feasibility.available_minutes,
+            optimistic_workload_minutes: plan.feasibility.optimistic_workload_minutes,
+            expected_workload_minutes: plan.feasibility.expected_workload_minutes,
+            pessimistic_workload_minutes: plan.feasibility.pessimistic_workload_minutes,
+        },
+        deadline: {
+            coursework_deadline: state.analysis.deadline_iso || state.analysis.deadline || null,
+            buffer_minutes: plan.deadline_buffer_minutes,
+        },
+        warnings: Array.isArray(plan.warnings) ? plan.warnings : [],
+        unfinished_mandatory_work: unfinishedMandatoryWork,
+        scheduled_blocks: (Array.isArray(plan.scheduled_blocks) ? plan.scheduled_blocks : []).map(block => ({
+            task_id: block.task_id,
+            task_title: block.task_title,
+            start: block.start,
+            end: block.end,
+            scheduled_minutes: block.scheduled_minutes,
+        })),
+        message: `Created and displayed a ${plan.feasibility.status.replace(/_/g, " ")} execution plan in CourseFlow.`,
+    };
+}
+
+async function createExecutionPlanForAgent() {
+    if (!state.analysis) {
+        return {
+            status: "not_ready",
+            message: "No coursework has been analyzed yet. The human must upload and analyze a PDF first.",
+        };
+    }
+
+    const availabilityError = validateAvailability(state.availability);
+    if (availabilityError) {
+        showError("avail-error", availabilityError);
+        showStage("stage-availability");
+        return {
+            status: "invalid_availability",
+            message: availabilityError,
+        };
+    }
+
+    hideError("avail-error");
+    const requestVersion = state.workflowVersion;
+    try {
+        const plan = await createExecutionPlanFromCurrentState(requestVersion);
+        if (!plan) {
+            return {
+                status: "cancelled",
+                message: "Plan creation was cancelled because the CourseFlow workflow changed.",
+            };
+        }
+        return executionPlanForAgent(plan);
+    } catch (error) {
+        const message = error.message || "CourseFlow could not build the execution plan.";
+        if (requestVersion === state.workflowVersion) showError("avail-error", message);
+        return {
+            status: "error",
+            message,
+        };
+    }
+}
+
+async function registerCourseFlowWebMcpTool(definition) {
+    try {
+        await document.modelContext.registerTool(definition);
+    } catch (error) {
+        console.warn(`[CourseFlow WebMCP] Could not register ${definition.name}.`, error);
+    }
+}
+
 async function registerCourseFlowWebMcpTools() {
     if (typeof document.modelContext?.registerTool !== "function") {
         return;
     }
 
-    try {
-        await document.modelContext.registerTool({
-            name: "get_coursework_analysis",
-            description: "Inspect the coursework analysis currently loaded by the human in CourseFlow. Call this after the human analyzes a PDF and before helping with requirements, workload, or planning.",
-            inputSchema: {
-                type: "object",
-                properties: {},
-                additionalProperties: false,
+    await registerCourseFlowWebMcpTool({
+        name: "get_coursework_analysis",
+        description: "Inspect the coursework analysis currently loaded by the human in CourseFlow. Call this after the human analyzes a PDF and before helping with requirements, workload, or planning.",
+        inputSchema: {
+            type: "object",
+            properties: {},
+            additionalProperties: false,
+        },
+        annotations: {
+            readOnlyHint: true,
+        },
+        execute: async () => courseworkAnalysisForAgent(),
+    });
+
+    await registerCourseFlowWebMcpTool({
+        name: "set_availability",
+        description: "Replace the student's availability windows visible in CourseFlow. Call this after coursework analysis and before creating a plan; it updates the Availability UI and clears any stale plan without generating a new one.",
+        inputSchema: {
+            type: "object",
+            properties: {
+                windows: {
+                    type: "array",
+                    minItems: 1,
+                    items: {
+                        type: "object",
+                        properties: {
+                            start: {
+                                type: "string",
+                                format: "date-time",
+                                description: "Timezone-aware ISO date-time for the start of a same-day, minute-aligned availability window.",
+                            },
+                            end: {
+                                type: "string",
+                                format: "date-time",
+                                description: "Timezone-aware ISO date-time after start for the end of the same-day, minute-aligned window.",
+                            },
+                        },
+                        required: ["start", "end"],
+                        additionalProperties: false,
+                    },
+                },
             },
-            annotations: {
-                readOnlyHint: true,
-            },
-            execute: async () => courseworkAnalysisForAgent(),
-        });
-    } catch (error) {
-        console.warn("[CourseFlow WebMCP] Could not register get_coursework_analysis.", error);
-    }
+            required: ["windows"],
+            additionalProperties: false,
+        },
+        execute: async (input = {}) => setAvailabilityForAgent(input.windows),
+    });
+
+    await registerCourseFlowWebMcpTool({
+        name: "create_execution_plan",
+        description: "Generate and display the real CourseFlow execution plan using the current coursework analysis and visible availability. Call this only after coursework has been analyzed and valid availability has been set; it invokes the existing planner API and updates the Plan UI.",
+        inputSchema: {
+            type: "object",
+            properties: {},
+            additionalProperties: false,
+        },
+        execute: async () => createExecutionPlanForAgent(),
+    });
 }
 
 void registerCourseFlowWebMcpTools();
