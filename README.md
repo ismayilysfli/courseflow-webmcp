@@ -155,6 +155,4 @@ npx tsx src/tests/test_suite.ts
 
 ## Deployment
 
-A Render deployment needs `GOOGLE_API_KEY` or `GEMINI_API_KEY` for PDF analysis; `PORT` is supported and otherwise defaults to `3000`. Firestore credentials are optional as described above. No production URL or Render service configuration is documented yet.
-
-Before deployment, finalize the production build/start command and static-asset handling. The current `npm start` script invokes `node server.ts`, while the TypeScript build writes `dist/server.js` and the server resolves `public/` and `static/` relative to its runtime directory. This repository documentation intentionally does not prescribe an unverified Render command.
+A Render deployment should use `npm start`, which runs `tsx server.ts` from the source root and therefore serves the existing `public/` and `static/` directories. Provide `GOOGLE_API_KEY` or `GEMINI_API_KEY` for PDF analysis; `PORT` is supported and otherwise defaults to `3000`. Firestore credentials are optional as described above. No production URL is documented yet.
