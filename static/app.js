@@ -896,3 +896,80 @@ document.getElementById("btn-accept-replan").addEventListener("click", () => {
     renderPlan();
     showStage("stage-plan");
 });
+
+function courseworkAnalysisForAgent() {
+    const analysis = state.analysis;
+    if (!analysis) {
+        return {
+            status: "not_ready",
+            message: "No coursework has been analyzed yet. The human must upload and analyze a PDF first.",
+        };
+    }
+
+    const sourcedRequirements = Array.isArray(analysis.requirement_evidence)
+        ? analysis.requirement_evidence
+        : [];
+    const tasks = Array.isArray(analysis.tasks) ? analysis.tasks : [];
+
+    return {
+        status: "ready",
+        assignment: {
+            title: analysis.title,
+            deadline: analysis.deadline || null,
+            deadline_iso: analysis.deadline_iso || null,
+        },
+        deliverables: Array.isArray(analysis.deliverable_evidence) && analysis.deliverable_evidence.length
+            ? analysis.deliverable_evidence.map(item => item.fact)
+            : (Array.isArray(analysis.deliverables) ? analysis.deliverables : []),
+        requirements: {
+            mandatory: sourcedRequirements.length
+                ? sourcedRequirements.filter(item => !item.is_optional).map(item => item.fact)
+                : (Array.isArray(analysis.requirements) ? analysis.requirements : []),
+            optional: sourcedRequirements
+                .filter(item => item.is_optional)
+                .map(item => item.fact),
+        },
+        tasks: tasks.map(task => ({
+            task_id: task.task_id || null,
+            title: task.title,
+            description: task.description,
+            source_requirement: task.source_requirement,
+            dependencies: Array.isArray(task.dependencies) ? task.dependencies : [],
+            is_optional: Boolean(task.is_optional),
+            workload_estimate_minutes: {
+                optimistic: task.optimistic_minutes,
+                expected: task.expected_minutes,
+                pessimistic: task.pessimistic_minutes,
+                confidence: task.confidence,
+            },
+        })),
+        ambiguities: Array.isArray(analysis.ambiguities) ? analysis.ambiguities : [],
+        warnings: Array.isArray(analysis.warnings) ? analysis.warnings : [],
+    };
+}
+
+async function registerCourseFlowWebMcpTools() {
+    if (typeof document.modelContext?.registerTool !== "function") {
+        return;
+    }
+
+    try {
+        await document.modelContext.registerTool({
+            name: "get_coursework_analysis",
+            description: "Inspect the coursework analysis currently loaded by the human in CourseFlow. Call this after the human analyzes a PDF and before helping with requirements, workload, or planning.",
+            inputSchema: {
+                type: "object",
+                properties: {},
+                additionalProperties: false,
+            },
+            annotations: {
+                readOnlyHint: true,
+            },
+            execute: async () => courseworkAnalysisForAgent(),
+        });
+    } catch (error) {
+        console.warn("[CourseFlow WebMCP] Could not register get_coursework_analysis.", error);
+    }
+}
+
+void registerCourseFlowWebMcpTools();
